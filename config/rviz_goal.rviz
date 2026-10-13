@@ -1,0 +1,72 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Fixed Frame: global
+    Background Color: 35; 35; 35
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid (1 m)
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Color: 120; 120; 120
+      Value: true
+    - Class: rviz_default_plugins/Odometry
+      Name: OpenVINS Vehicle
+      Enabled: true
+      Topic:
+        Value: /openvins/body_odom
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Shape: Arrow
+      Color: 40; 220; 100
+      Keep: 1
+      Position Tolerance: 0
+      Angle Tolerance: 0
+      Shaft Length: 0.4
+      Shaft Radius: 0.04
+      Head Length: 0.15
+      Head Radius: 0.1
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Name: Selected Target
+      Enabled: true
+      Topic:
+        Value: /rviz_goal/target
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Value: true
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: global
+      Scale: 65
+      X: 0
+      Y: 0
+      Angle: 0
+Window Geometry:
+  Width: 1200
+  Height: 850

@@ -1,0 +1,26 @@
+px4ctrl2:
+  ros__parameters:
+    use_sim_time: false
+    control_frequency: 100.0
+    odom_topic: /mavros/local_position/odom
+    command_topic: /px4ctrl2/command
+    velocity_in_body: true
+    no_rc: true
+    enable_auto_arm: true
+    takeoff_height: 1.0
+    takeoff_land_speed: 0.3
+    hover_percentage: 0.76  # x500_depth SITL starting point; flight validation pending
+    kp: [1.5, 1.5, 1.5]
+    kv: [1.5, 1.5, 1.5]
+    max_angle_deg: 25.0
+    max_thrust: 0.9
+    feedback_timeout: 0.5
+    state_timeout: 5.0  # MAVROS state/extended_state arrive about every 2 s in this SITL setup
+    command_timeout: 0.5
+    operation_timeout: 10.0
+    takeoff_timeout: 30.0
+    max_manual_velocity: 0.8
+    rc_reverse.roll: false
+    rc_reverse.pitch: false
+    rc_reverse.throttle: false
+    rc_reverse.yaw: false

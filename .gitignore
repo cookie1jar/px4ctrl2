@@ -1,0 +1,16 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ROS/colcon generated outputs
+build/
+install/
+log/
+logs/
+
+# Editors and local environments
+.vscode/
+.idea/
+.venv/
+*~

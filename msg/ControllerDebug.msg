@@ -1,0 +1,6 @@
+std_msgs/Header header
+string state
+geometry_msgs/Vector3 desired_acceleration
+geometry_msgs/Quaternion desired_orientation
+float64 thrust
+float64 thrust_to_acceleration
