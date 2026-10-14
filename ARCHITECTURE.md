@@ -19,11 +19,14 @@ px4ctrl2/
 ├── STARTUP.md                        # PX4/MAVROS 手动启动与起降检查
 ├── include/
 │   └── px4ctrl2/
-│       ├── controller.hpp            # Eigen 控制数学及推力映射辨识
-│       └── px4ctrl2_node.hpp          # ROS 节点、输入检查、状态机和飞控适配
+│       ├── controller.hpp            # 控制数据类型与算法接口声明
+│       └── px4ctrl2_node.hpp          # ROS 节点声明、成员与状态定义
 ├── src/
 │   ├── main.cpp                      # 进程入口及单线程 executor
-│   └── px4ctrl_node.cpp               # 节点实现头文件的编译单元
+│   ├── controller.cpp                # 控制数学、限幅和推力映射辨识
+│   ├── px4ctrl_node.cpp               # 节点初始化、参数加载与 ROS 接口注册
+│   ├── input_callbacks.cpp            # 具名订阅回调与输入检查
+│   └── state_machine.cpp              # 状态转移、起降请求及控制循环
 ├── msg/
 │   ├── PositionCommand.msg           # 位置、速度、加速度、jerk、航向参考
 │   ├── TakeoffLand.msg               # 起飞/降落请求
@@ -36,6 +39,7 @@ px4ctrl2/
 ├── scripts/
 │   ├── rviz_goal_node.py              # RViz 目标处理及 20 Hz 位置指令输出
 │   ├── goal_trajectory.py             # 平滑位置/航向轨迹计算
+│   ├── rviz_goal_marker.py            # 三维目标标记与轴控制定义
 │   ├── position_command_bridge.py     # 可选 EGO-Planner 消息适配
 │   └── thrust_calibrate.py            # 推力/电压 CSV 记录
 └── test/
@@ -44,13 +48,13 @@ px4ctrl2/
     └── mock_mavros_test.py            # 模拟 MAVROS 协议与状态机测试
 ```
 
-上述结构对应当前实现。规划中的接口抽象和状态机拆分尚未形成独立目录或类。
+上述结构对应当前实现。include 只保留类型、成员和函数声明，所有 C++ 函数实现位于 src。状态机与输入回调已按源文件分离，仍属于同一个 Node 类。进一步的接口抽象尚未形成独立类。
 
 ## 3. C++ 控制核心
 
-### 3.1 controller.hpp
+### 3.1 controller.hpp 与 controller.cpp
 
-该文件不依赖 ROS 通信，使用 Eigen 表示三维向量和四元数。
+头文件定义 Feedback、Desired、Output 和 LinearControl 接口，源文件实现四元数辅助函数、控制计算和推力映射辨识。该模块不依赖 ROS 通信，使用 Eigen 表示三维向量和四元数。
 
 | 类型/函数 | 职责 |
 |---|---|
@@ -77,7 +81,7 @@ a_des = a_reference + Kv × (v_reference - v_feedback)
 
 ### 3.2 px4ctrl2_node.hpp
 
-`px4ctrl2::Node` 目前集中实现以下逻辑：
+头文件声明 `px4ctrl2::Node` 的构造函数、私有回调、状态机方法和成员，不包含函数体。实现分布在三个源文件中：
 
 - 声明并校验控制参数。
 - 订阅里程计、飞控 IMU、飞控状态、落地状态、可选 RC 和位置参考。
@@ -89,11 +93,21 @@ a_des = a_reference + Kv × (v_reference - v_feedback)
 
 控制循环与输入接收超时使用单调时钟；ROS 时钟用于消息时间戳。节点在单线程 executor 中运行。
 
-### 3.3 main.cpp 与 px4ctrl_node.cpp
+`odom_reference_time=true` 时，运动参考及推力模型窗口使用里程计源时间，避免慢速仿真放大参考速度。控制调度、反馈新鲜度和模式/解锁确认仍使用主机单调时钟；默认 false 保持原时间配置。
 
-`main.cpp` 负责 ROS 初始化、创建节点、执行 spin、异常处理和 shutdown。
+### 3.3 源文件职责
 
-`px4ctrl_node.cpp` 当前仅包含 `px4ctrl2_node.hpp`。实际 ROS 节点方法仍定义在头文件中，尚未迁移到独立 `.cpp` 实现。维护状态机和订阅逻辑时，应修改 `include/px4ctrl2/px4ctrl2_node.hpp`。
+| 源文件 | 职责 | 主要方法 |
+|---|---|---|
+| `main.cpp` | 进程生命周期 | ROS 初始化、创建 Node、spin、异常退出 |
+| `px4ctrl_node.cpp` | 构造与 ROS 接口注册 | Node、load_parameters、setup_subscriptions、setup_publishers、setup_services |
+| `input_callbacks.cpp` | 订阅输入与有效性检查 | on_odometry、on_imu、on_state、on_extended_state、on_rc、on_command、on_takeoff_land |
+| `state_machine.cpp` | 飞行操作与控制循环 | transition、takeoff、hover、land、tick、request_mode、request_arm、publish |
+| `controller.cpp` | 无 ROS 的控制数学 | yaw、validQuaternion、reset、calculate、estimate、scale |
+
+修改订阅检查时定位到 input_callbacks.cpp；修改起降状态转移时定位到 state_machine.cpp；修改参数或 ROS 接口注册时定位到 px4ctrl_node.cpp。新增成员或方法时在对应头文件补充声明。
+
+初始化顺序保持为参数加载、订阅注册、发布注册、服务注册及定时器创建。订阅回调使用具名成员函数绑定，操作服务通过统一的成员函数指针适配。
 
 ## 4. 飞行状态机
 
@@ -147,6 +161,8 @@ stateDiagram-v2
 
 默认 Fixed Frame 为 `global`，显示机体定位及目标标记，并配置 `2D Goal Pose` 工具发布 `/goal_pose`。网格尺寸为 1 米。
 
+默认视角为 Orbit。rviz_goal_marker.py 创建三轴平移与航向旋转控制；目标节点内 InteractiveMarkerServer 管理草稿，菜单确认后使用完整三维目标。`/goal_pose_3d` 保留指定高度，二维输入仍保持飞行高度。
+
 ## 6. 其他脚本
 
 | 文件 | 输入/输出 | 边界 |
@@ -189,6 +205,8 @@ stateDiagram-v2
 | 接口 | 类型 | 用途 |
 |---|---|---|
 | `/goal_pose` | `geometry_msgs/msg/PoseStamped` | RViz 点击目标 |
+| `/goal_pose_3d` | `geometry_msgs/msg/PoseStamped` | 完整 x/y/z 目标 |
+| `/rviz_goal/interactive_target` | InteractiveMarkerServer 命名空间 | 三维目标编辑与确认 |
 | `/openvins/body_odom` | `nav_msgs/msg/Odometry` | 当前目标节点的定位输入 |
 | `/rviz_goal/target` | `visualization_msgs/msg/Marker` | 目标显示 |
 | `/rviz_goal/status` | `std_msgs/msg/String` | 目标处理结果 |
@@ -211,7 +229,7 @@ stateDiagram-v2
 `CMakeLists.txt` 执行以下任务：
 
 1. 生成三个自定义消息的 ROS 类型支持。
-2. 编译 `px4ctrl2_node`。
+2. 将 controller.cpp 构建为内部静态库 px4ctrl2_control，供控制节点与 controller_test 共用；编译 Node 的三个实现源文件和 main.cpp 生成 px4ctrl2_node。
 3. 安装 Python 脚本及轨迹辅助模块到 `lib/px4ctrl2/`。
 4. 安装 launch、配置和技术文档到 `share/px4ctrl2/`。
 5. BUILD_TESTING 启用时注册 `controller_test` 与 `rviz_goal_test`。
@@ -245,7 +263,7 @@ RViz 目标 → 目标节点 → 平滑参考 → px4ctrl2 → MAVROS → PX4 �
 
 ## 12. 后续模块拆分方向
 
-当前 ROS 节点将输入、状态机和 MAVROS 适配集中在 `px4ctrl2_node.hpp`。后续可按以下边界拆分：
+当前输入、状态机和 ROS 注册已分布到独立 .cpp 文件，但仍共享 Node 成员状态。后续可进一步拆为独立组件：
 
 - 输入层：消息检查与不可变反馈快照。
 - 飞控接口层：模式/解锁请求与设定值发送。

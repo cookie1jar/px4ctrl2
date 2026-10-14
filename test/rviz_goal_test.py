@@ -41,6 +41,9 @@ class TrajectoryTest(unittest.TestCase):
 class Harness(GoalNode):
     """Exercise goal handling and command generation without DDS or a vehicle."""
     def __init__(self):
+        self.ego_mode = False
+        self.ego_map_timeout = 2.
+        self.ego_goal = self.ego_command = None
         self.speed, self.accel, self.max_distance, self.position_tolerance = 0.4, 0.3, 5., 0.15
         self.state = 'AUTO_HOVER'
         self.state_at = self.odom_at = time.monotonic()
@@ -49,6 +52,8 @@ class Harness(GoalNode):
         self.odom.pose.pose.position.z = 1.2
         self.odom.pose.pose.orientation.w = 1.
         self.trajectory = None
+        self.editable_initialized = True
+        self.marker_server = Namespace(erase=lambda name: None, applyChanges=lambda: None)
         self.start_at = self.goal_at = 0.
         self.settled_at = self.hover_future = None
         self.commands, self.markers = [], []
@@ -63,6 +68,11 @@ class Harness(GoalNode):
     def get_clock(self):
         from builtin_interfaces.msg import Time
         return Namespace(now=lambda: Namespace(to_msg=lambda: Time(sec=1)))
+
+    def reference_time(self):
+        # Legacy cases use one clock; the slow-simulation regression below
+        # separates this reference from wall-clock reception watchdogs.
+        return time.monotonic()
 
 
 class GoalHandlingTest(unittest.TestCase):
@@ -127,6 +137,106 @@ class GoalHandlingTest(unittest.TestCase):
             self.assertIsNotNone(node.trajectory)
             node.goal(invalid)
             self.assertIsNotNone(node.trajectory)
+
+    def test_3d_goal_tracks_requested_height(self):
+        node = Harness()
+        goal = self.make_goal()
+        goal.pose.position.z = 2.4
+        node.goal_3d(goal)
+        self.assertIsNotNone(node.trajectory)
+        final, velocity, acceleration = node.trajectory.sample(node.trajectory.duration)
+        np.testing.assert_allclose(final[:3], [1., 0., 2.4], atol=1e-9)
+        mid = node.start_at+node.trajectory.duration/2
+        node.odom_at = node.state_at = mid
+        with patch('rviz_goal_node.time.monotonic', return_value=mid):
+            node.tick()
+        self.assertGreater(node.commands[-1].position.z, 1.2)
+        self.assertGreater(node.commands[-1].velocity.z, 0.)
+
+    def test_3d_nan_height_rejected(self):
+        node = Harness()
+        goal = self.make_goal()
+        goal.pose.position.z = math.nan
+        node.goal_3d(goal)
+        self.assertIsNone(node.trajectory)
+
+    def test_slow_simulation_progresses_in_sensor_seconds(self):
+        node = Harness()
+        node.odom.header.stamp.sec = 100
+        node.reference_time = lambda: GoalNode.reference_time(node)
+        goal = self.make_goal()
+        goal.pose.position.x = 2.
+        node.goal_3d(goal)
+        self.assertEqual(node.start_at, 100.)
+        wall = time.monotonic()+5.
+        node.state_at = node.odom_at = wall
+        node.odom.header.stamp.sec = 101  # 0.2x simulation speed
+        with patch('rviz_goal_node.time.monotonic', return_value=wall):
+            node.tick()
+        expected = node.trajectory.sample(1.)
+        self.assertAlmostEqual(node.commands[-1].position.x, expected[0][0])
+        self.assertAlmostEqual(node.commands[-1].velocity.x, expected[1][0])
+        self.assertLess(node.commands[-1].position.x, node.trajectory.sample(5.)[0][0])
+        # Retarget at the same sensor time, despite a later wall clock.
+        wall += 0.2
+        node.state_at = node.odom_at = wall
+        with patch('rviz_goal_node.time.monotonic', return_value=wall):
+            node.goal(self.make_goal())
+        np.testing.assert_allclose(node.trajectory.sample(0.)[0], expected[0], atol=1e-9)
+        # Reception still times out on real time if simulation stops.
+        with patch('rviz_goal_node.time.monotonic', return_value=wall+0.6):
+            node.tick()
+        self.assertIsNone(node.trajectory)
+
+    def test_ego_mode_routes_goal_and_blocks_old_or_stale_commands(self):
+        node=Harness();node.ego_mode=True
+        node.reference_time=lambda:100.
+        node.ego_goal=node.ego_command=None
+        node.ego_seen_id=7;node.ego_map_at=time.monotonic()
+        goals=[];node.ego_goal_pub=Namespace(publish=goals.append)
+        node.goal_3d(self.make_goal())
+        self.assertEqual(len(goals),1)
+        self.assertIsNone(node.trajectory)  # No competing straight-line generator.
+        from geometry_msgs.msg import Point, Vector3
+        from std_msgs.msg import Header
+        cmd=Namespace(trajectory_id=7,trajectory_flag=1,TRAJECTORY_STATUS_READY=1,
+                      header=Header(frame_id='global'),position=Point(x=.1,z=1.2),
+                      velocity=Vector3(x=.1),acceleration=Vector3(),yaw=0.,yaw_dot=0.)
+        cmd.header.stamp.sec=100
+        node.on_ego_command(cmd)
+        self.assertIsNone(node.ego_command)
+        cmd.trajectory_id=8
+        node.on_ego_command(cmd);node.tick()
+        self.assertEqual(len(node.commands),1)
+        self.assertAlmostEqual(node.commands[0].position.x,.1)
+        node.ego_command_at-=1.
+        node.tick()
+        self.assertIsNone(node.ego_goal)
+        self.assertEqual(len(node.commands),1)
+
+    def test_drag_only_edits_submit_starts_3d_trajectory(self):
+        from visualization_msgs.msg import InteractiveMarkerFeedback
+        from rviz_goal_marker import make_goal_marker
+        node = Harness()
+        feedback = InteractiveMarkerFeedback()
+        feedback.header.frame_id = 'global'
+        feedback.pose.position.x = 1.
+        feedback.pose.position.z = 2.
+        feedback.pose.orientation.w = 1.
+        for event in [feedback.POSE_UPDATE, feedback.MOUSE_UP]:
+            feedback.event_type = event
+            node.edit_marker(feedback)
+            self.assertIsNone(node.trajectory)
+            self.assertEqual(node.commands, [])
+        node.submit_marker(feedback)
+        self.assertAlmostEqual(node.trajectory.sample(node.trajectory.duration)[0][2], 2.)
+        marker = make_goal_marker(feedback.pose)
+        self.assertEqual(marker.header.frame_id, 'global')
+        self.assertEqual([c.name for c in marker.controls],
+                         ['target_menu', 'move_x', 'move_y', 'move_z', 'rotate_yaw'])
+        node.on_state(Namespace(data='AUTO_LAND'))
+        self.assertIsNone(node.trajectory)
+        self.assertFalse(node.editable_initialized)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 #include "px4ctrl2/controller.hpp"
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 using namespace px4ctrl2;

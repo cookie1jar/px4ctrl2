@@ -3,6 +3,8 @@ Panels:
     Name: Displays
   - Class: rviz_common/Tool Properties
     Name: Tool Properties
+  - Class: rviz_common/Views
+    Name: Views
 Visualization Manager:
   Class: ""
   Global Options:
@@ -10,6 +12,30 @@ Visualization Manager:
     Background Color: 35; 35; 35
     Frame Rate: 30
   Displays:
+    - Class: rviz_default_plugins/PointCloud2
+      Name: EGO Inflated Obstacles
+      Enabled: true
+      Topic:
+        Value: /ego/occupancy_inflate
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 2
+      Size (m): 0.1
+      Style: Boxes
+      Color Transformer: FlatColor
+      Color: 255; 80; 80
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Name: EGO Planned Trajectory
+      Enabled: true
+      Topic:
+        Value: /ego/planned_path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 2
+      Value: true
     - Class: rviz_default_plugins/Grid
       Name: Grid (1 m)
       Enabled: true
@@ -17,6 +43,14 @@ Visualization Manager:
       Plane Cell Count: 20
       Reference Frame: <Fixed Frame>
       Color: 120; 120; 120
+      Value: true
+    - Class: rviz_default_plugins/InteractiveMarkers
+      Name: Editable 3D Target
+      Enabled: true
+      Interactive Markers Namespace: /rviz_goal/interactive_target
+      Show Axes: true
+      Show Descriptions: true
+      Show Visual Aids: true
       Value: true
     - Class: rviz_default_plugins/Odometry
       Name: OpenVINS Vehicle
@@ -60,13 +94,16 @@ Visualization Manager:
         Depth: 5
   Views:
     Current:
-      Class: rviz_default_plugins/TopDownOrtho
+      Class: rviz_default_plugins/Orbit
       Name: Current View
       Target Frame: global
-      Scale: 65
-      X: 0
-      Y: 0
-      Angle: 0
+      Distance: 10
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 1
+      Pitch: 0.7
+      Yaw: 0.8
 Window Geometry:
   Width: 1200
   Height: 850

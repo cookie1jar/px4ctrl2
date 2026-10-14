@@ -9,16 +9,25 @@ foreach(dep rclcpp nav_msgs sensor_msgs geometry_msgs std_msgs std_srvs mavros_m
   find_package(${dep} REQUIRED)
 endforeach()
 rosidl_generate_interfaces(${PROJECT_NAME} "msg/PositionCommand.msg" "msg/TakeoffLand.msg" "msg/ControllerDebug.msg" DEPENDENCIES std_msgs geometry_msgs)
-add_executable(px4ctrl2_node src/main.cpp src/px4ctrl_node.cpp)
+add_library(px4ctrl2_control STATIC src/controller.cpp)
+target_include_directories(px4ctrl2_control PUBLIC include)
+target_link_libraries(px4ctrl2_control PUBLIC Eigen3::Eigen)
+
+add_executable(px4ctrl2_node
+  src/main.cpp
+  src/px4ctrl_node.cpp
+  src/input_callbacks.cpp
+  src/state_machine.cpp
+)
 target_include_directories(px4ctrl2_node PRIVATE include)
-target_link_libraries(px4ctrl2_node Eigen3::Eigen)
+target_link_libraries(px4ctrl2_node px4ctrl2_control)
 ament_target_dependencies(px4ctrl2_node rclcpp nav_msgs sensor_msgs geometry_msgs std_msgs std_srvs mavros_msgs)
 rosidl_get_typesupport_target(typesupport ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(px4ctrl2_node "${typesupport}")
 install(TARGETS px4ctrl2_node DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/position_command_bridge.py scripts/thrust_calibrate.py DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/rviz_goal_node.py DESTINATION lib/${PROJECT_NAME})
-install(FILES scripts/goal_trajectory.py DESTINATION lib/${PROJECT_NAME})
+install(FILES scripts/goal_trajectory.py scripts/rviz_goal_marker.py DESTINATION lib/${PROJECT_NAME})
 install(FILES README.md STARTUP.md ARCHITECTURE.md DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
@@ -26,7 +35,7 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_executable(controller_test test/controller_test.cpp)
   target_include_directories(controller_test PRIVATE include)
-  target_link_libraries(controller_test Eigen3::Eigen)
+  target_link_libraries(controller_test px4ctrl2_control)
   add_test(NAME controller_test COMMAND controller_test)
   add_test(NAME rviz_goal_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/rviz_goal_test.py)
 endif()

@@ -1,6 +1,8 @@
-// px4ctrl2 process entrypoint. ROS-facing implementation lives in px4ctrl_node.cpp.
+// Process entrypoint; ROS wiring, input callbacks and state machine live in src/.
 #include <rclcpp/rclcpp.hpp>
 #include "px4ctrl2/px4ctrl2_node.hpp"
+#include <cstdio>
+#include <exception>
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);

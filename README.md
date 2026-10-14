@@ -9,6 +9,10 @@ ROS 2 外部位置控制包。接收里程计和位置参考，生成目标姿�
 - [文件架构与模块说明](ARCHITECTURE.md)：完整目录、文件职责、数据流、状态机和接口边界。
 - [仿真启动与起降检查](STARTUP.md)：PX4/MAVROS 手动启动及控制器检查流程。
 
+## C++ 源码组织
+
+include/px4ctrl2 仅声明类型和接口；实现位于 src：controller.cpp 负责控制数学，px4ctrl_node.cpp 负责参数和接口注册，input_callbacks.cpp 负责输入检查，state_machine.cpp 负责起降状态机及控制循环，main.cpp 负责进程入口。完整文件说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
 ## 功能
 
 - 起飞、悬停、位置参考跟踪、降落。
@@ -16,6 +20,7 @@ ROS 2 外部位置控制包。接收里程计和位置参考，生成目标姿�
 - 反馈新鲜度、源时间戳、坐标系、有限数值和四元数检查。
 - 姿态/推力限幅，以及反馈失效时停止外部设定值。
 - RViz 2D 目标点输入、平滑轨迹、到点悬停和目标取消。
+- 三维交互目标：拖动 x/y/z 轴与航向环，右键 Fly to target 提交；Orbit 视角支持自由操控。
 - 可选 EGO-Planner 消息适配，以及推力/电压 CSV 记录。
 
 节点启动不会自动解锁。起飞需显式服务或消息请求。点目标功能不包含避障。
@@ -27,6 +32,8 @@ ROS 2 外部位置控制包。接收里程计和位置参考，生成目标姿�
 本包不包含 OpenVINS、PX4、MAVROS、Gazebo、传感器桥或完整工程的一键启动脚本。独立安装后仍需外部系统提供定位及飞控通信。定位精度、长期漂移、完整异常恢复和真机飞行尚未完成独立验收；降落异常轮次需单独排查，不应归为完整起降成功。
 
 ## 依赖与构建
+
+目标节点可通过 `use_ego_planner:=true` 使用外部 EGO 轨迹，需额外安装 quadrotor_msgs，并提供 /ego/camera_pose 和 /ego/position_cmd。该模式只转发经过门控的规划参考，不并行生成直线参考；完整 EGO 启动及深度适配属于外部集成工程。当前完成接口测试，避障飞行尚待验证。
 
 使用 C++17、ament_cmake、Eigen、rclcpp、mavros_msgs、ROS 标准消息、rclpy、NumPy、visualization_msgs 和 RViz。可选 EGO 适配脚本另需 `quadrotor_msgs`。
 
@@ -89,6 +96,8 @@ ros2 run rviz2 rviz2 -d "$(ros2 pkg prefix --share px4ctrl2)/config/rviz_goal.rv
 
 起飞进入 AUTO_HOVER 后，使用 RViz 的 2D Goal Pose 点击并拖动设置目标位置和最终航向。节点保持当前高度，默认速度上限 0.4 m/s、加速度上限 0.3 m/s²，单次目标距机体不超过 5 米。
 
+三维目标使用 Interact 拖动蓝色目标球的轴和航向环；右键选择 Fly to target 才提交，Reset to vehicle 重置草稿。也支持 `/goal_pose_3d`（PoseStamped，global 坐标，使用完整 x/y/z）。默认视角为 Orbit，Move Camera 可旋转、平移和缩放。三维扩展已通过代码测试，实际图形交互/飞行待验证。
+
 目标流取消服务：
 
 ```bash
@@ -112,7 +121,9 @@ ros2 service call /rviz_goal/cancel std_srvs/srv/Trigger '{}'
 
 位置参考与里程计必须处于相同世界坐标系，世界 z 向上，机体使用 FLU，不做隐式 TF 转换。`velocity_in_body=true` 时旋转机体线速度到世界坐标；速度已在世界系表达时使用 false。MAVROS 负责飞控边界 ENU/NED、FLU/FRD 转换。
 
-反馈/操作超时使用单调时钟，消息时间戳使用 ROS 时钟。定位或 IMU 超时、时间回退、飞行中 frame 改变、飞控退出控制等可进入 ABORT。ABORT 不自动重抢 OFFBOARD，由 PX4 已配置的保护策略处理。
+反馈/模式确认超时使用单调时钟，消息时间戳使用 ROS 时钟。`odom_reference_time:=true` 可让运动参考、起降阶段时长和推力映射辨识使用里程计源时间，适用于慢速 SITL；默认 false。RViz 轨迹始终按里程计源时间推进，接收超时保护仍使用主机单调时钟。
+
+定位或 IMU 超时、时间回退、飞行中 frame 改变、飞控退出控制等可进入 ABORT。ABORT 不自动重抢 OFFBOARD，由 PX4 已配置的保护策略处理。
 
 ## 测试
 
