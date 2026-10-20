@@ -6,6 +6,16 @@
 
 namespace px4ctrl2 {
 
+void Node::on_clock(rosgraph_msgs::msg::Clock::ConstSharedPtr m) {
+  const int64_t stamp = rclcpp::Time(m->clock).nanoseconds();
+  if (stamp < simulation_stamp_) {
+    have_odom_ = have_imu_ = have_command_ = false;
+    if (state_ != State::MANUAL && state_ != State::ABORT) abort("simulation clock moved backwards");
+  }
+  if (stamp != simulation_stamp_) simulation_at_ = monotonic();
+  simulation_stamp_ = stamp;
+}
+
 void Node::on_odometry(nav_msgs::msg::Odometry::ConstSharedPtr m) {
   const int64_t stamp = rclcpp::Time(m->header.stamp).nanoseconds();
   if (stamp <= 0 || stamp == odom_stamp_) {
@@ -67,6 +77,7 @@ void Node::on_imu(sensor_msgs::msg::Imu::ConstSharedPtr m) {
   imu_a_ = a;
   have_imu_ = true;
   imu_at_ = monotonic();
+  imu_simulation_stamp_ = simulation_stamp_;
 }
 
 void Node::on_state(mavros_msgs::msg::State::ConstSharedPtr m) {
@@ -116,6 +127,7 @@ void Node::on_command(msg::PositionCommand::ConstSharedPtr m) {
   command_ = d;
   have_command_ = true;
   command_at_ = monotonic();
+  command_stamp_ = rclcpp::Time(m->header.stamp).nanoseconds();
 }
 
 void Node::on_takeoff_land(msg::TakeoffLand::ConstSharedPtr m) {

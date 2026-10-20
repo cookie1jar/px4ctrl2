@@ -2,6 +2,7 @@
 // ROS 2 migration of Fast-Drone px4ctrl. GPL-3.0-only.
 
 #include "px4ctrl2/controller.hpp"
+#include "px4ctrl2/freshness.hpp"
 #include "px4ctrl2/msg/controller_debug.hpp"
 #include "px4ctrl2/msg/position_command.hpp"
 #include "px4ctrl2/msg/takeoff_land.hpp"
@@ -15,6 +16,7 @@
 #include <mavros_msgs/srv/set_mode.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -54,6 +56,7 @@ class Node : public rclcpp::Node {
   void on_rc(mavros_msgs::msg::RCIn::ConstSharedPtr message);
   void on_command(msg::PositionCommand::ConstSharedPtr message);
   void on_takeoff_land(msg::TakeoffLand::ConstSharedPtr message);
+  void on_clock(rosgraph_msgs::msg::Clock::ConstSharedPtr message);
 
   // Flight state machine and control output (src/state_machine.cpp).
   double monotonic();
@@ -89,6 +92,9 @@ class Node : public rclcpp::Node {
   std::array<bool, 4> rc_reverse_{};
   bool rc_hover_{false}, rc_command_{false}, no_rc_, auto_arm_, velocity_body_;
   bool odom_reference_time_{false};
+  bool simulation_feedback_{false};
+  int64_t simulation_stamp_{-1}, imu_simulation_stamp_{-1}, command_stamp_{-1};
+  double simulation_at_{0}, simulation_wall_timeout_{2.0};
   bool have_odom_{false}, have_imu_{false}, have_state_{false};
   bool have_rc_{false}, have_extended_{false}, have_command_{false};
   bool takeoff_requested_{true};
@@ -111,6 +117,7 @@ class Node : public rclcpp::Node {
 
   // ROS entities.
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Subscription<rosgraph_msgs::msg::Clock>::SharedPtr clock_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;

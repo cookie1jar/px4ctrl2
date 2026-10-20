@@ -8,24 +8,40 @@ Panels:
 Visualization Manager:
   Class: ""
   Global Options:
-    Fixed Frame: global
+    Fixed Frame: vio_odom
     Background Color: 35; 35; 35
     Frame Rate: 30
   Displays:
     - Class: rviz_default_plugins/PointCloud2
-      Name: EGO Inflated Obstacles
+      Name: Observed Surfaces (no inflation)
       Enabled: true
+      Topic:
+        Value: /ego/occupancy
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 2
+      Alpha: 0.8
+      Size (m): 0.04
+      Style: Flat Squares
+      Color Transformer: FlatColor
+      Color: 185; 195; 205
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Planning Safety Margin (inflated)
+      Enabled: false
       Topic:
         Value: /ego/occupancy_inflate
         Reliability Policy: Best Effort
         Durability Policy: Volatile
         History Policy: Keep Last
         Depth: 2
-      Size (m): 0.1
-      Style: Boxes
+      Alpha: 0.18
+      Size (m): 0.045
+      Style: Flat Squares
       Color Transformer: FlatColor
-      Color: 255; 80; 80
-      Value: true
+      Color: 80; 165; 230
+      Value: false
     - Class: rviz_default_plugins/Marker
       Name: EGO Planned Trajectory
       Enabled: true
@@ -35,6 +51,22 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Depth: 2
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: OpenVINS Flown Path (yellow)
+      Enabled: true
+      Topic:
+        Value: /openvins/flight_path
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Buffer Length: 1
+      Line Style: Billboards
+      Line Width: 0.04
+      Color: 255; 220; 40
+      Alpha: 1
+      Pose Style: None
       Value: true
     - Class: rviz_default_plugins/Grid
       Name: Grid (1 m)
@@ -96,7 +128,7 @@ Visualization Manager:
     Current:
       Class: rviz_default_plugins/Orbit
       Name: Current View
-      Target Frame: global
+      Target Frame: vio_odom
       Distance: 10
       Focal Point:
         X: 0

@@ -56,7 +56,12 @@ void Node::transition(State s) {
 }
 
 bool Node::feedback(double t) const {
-  return have_odom_ && have_imu_ && t - odom_at_ < feedback_timeout_ && t - imu_at_ < feedback_timeout_;
+  if (simulation_feedback_ && simulation_stamp_ <= 0) return false;
+  return have_odom_ && have_imu_ &&
+         freshSample(simulation_feedback_, t-odom_at_, (simulation_stamp_-odom_stamp_)*1e-9,
+                     t-simulation_at_, feedback_timeout_, simulation_wall_timeout_) &&
+         freshSample(simulation_feedback_, t-imu_at_, (simulation_stamp_-imu_simulation_stamp_)*1e-9,
+                     t-simulation_at_, feedback_timeout_, simulation_wall_timeout_);
 }
 
 bool Node::connected(double t) const {
@@ -68,7 +73,8 @@ bool Node::rc_valid(double t) const {
 }
 
 bool Node::command_valid(double t) const {
-  return have_command_ && t - command_at_ < command_timeout_;
+  return have_command_ && freshSample(simulation_feedback_, t-command_at_,
+      (simulation_stamp_-command_stamp_)*1e-9, t-simulation_at_, command_timeout_, simulation_wall_timeout_);
 }
 
 bool Node::grounded(double t) const {
@@ -212,6 +218,7 @@ std::pair<bool, std::string> Node::hover() {
 void Node::publish(const Output &u) {
   mavros_msgs::msg::AttitudeTarget out;
   out.header.stamp = now();
+  if (simulation_feedback_) out.header.stamp = rclcpp::Time(simulation_stamp_);
   out.header.frame_id = "base_link";
   out.type_mask = out.IGNORE_ROLL_RATE | out.IGNORE_PITCH_RATE | out.IGNORE_YAW_RATE;
   out.orientation.w = u.q.w();
@@ -251,6 +258,11 @@ void Node::tick() {
                  have_state_, fcu_.connected, t - state_at_, state_timeout_,
                  have_odom_, t - odom_at_, have_imu_, t - imu_at_, feedback_timeout_,
                  no_rc_, rc_valid(t), t - rc_at_);
+    if (simulation_feedback_) {
+      RCLCPP_ERROR(get_logger(), "Simulation feedback: clock_age=%.3fs odom_delay=%.3fs imu_delay=%.3fs wall_limit=%.3fs",
+                   t-simulation_at_, (simulation_stamp_-odom_stamp_)*1e-9,
+                   (simulation_stamp_-imu_simulation_stamp_)*1e-9, simulation_wall_timeout_);
+    }
     abort("connection, odom, IMU or RC unavailable/stale");
     return;
   }

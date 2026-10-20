@@ -1,30 +1,31 @@
 # px4ctrl2 仿真启动与起降验证（逐终端）
 
-适用：本项目 ROS 2 Humble、Gazebo Harmonic、PX4 v1.16、源码编译的 MAVROS。路径均使用绝对路径，可以直接复制。准备 **4 个终端**，按下面顺序操作。
+适用：本项目 ROS 2 Humble、Gazebo Harmonic、PX4 v1.16、源码编译的 MAVROS。以下使用完整集成工程的目录示例；请按实际安装位置调整。准备 **4 个终端**，按下面顺序操作。
 
 当前状态：本包已在完整工程中运行 OpenVINS 定位反馈下的起飞、悬停和 RViz 点目标飞行。本文保留使用 MAVROS/PX4 定位的手动分终端流程，不等同于无 GPS 的完整工程一键流程。文件架构及外部组件边界见 [ARCHITECTURE.md](ARCHITECTURE.md)，独立包构建及 RViz 启动见 [README.md](README.md)。
 
-本文使用原验证电脑的工程路径。独立克隆本包时需按实际工作空间调整路径，并单独部署 PX4、MAVROS 和定位组件。默认 hover_percentage=0.76、max_thrust=0.9 对应当前 x500_depth 仿真，不作为真机标定结果。
+本文依赖外部集成工程提供 PX4 模型、世界及 MAVROS，不是独立克隆本仓库后即可运行的整套仿真。包内 hover_percentage=0.76 是历史模型的起点；目前搭载 MID360 的完整工程使用独立生成的约 0.835 配置。实际数值需匹配模型或实机，不应按文中的历史常数强制设置。
 
 ## 0. 首次使用新配置：构建一次
 
 在任意普通终端执行，完成后再开始以下四终端流程：
 
 ```bash
-cd /home/l/my_ws/my_uav_vln/ros2_ws
+cd ~/my_ws/my_uav_vln/ros2_ws
 source /opt/ros/humble/setup.bash
-source /home/l/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
-colcon build --packages-select px4ctrl2
+source ~/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
+colcon build --packages-select px4ctrl2 --parallel-workers 1 \
+  --cmake-args -DAMENT_CMAKE_SYMLINK_INSTALL=OFF
 ```
 
-配置安装在 `/home/l/my_ws/my_uav_vln/ros2_ws/install/px4ctrl2/share/px4ctrl2/config/ctrl.yaml`。改源目录配置后需要重新构建/安装，才能影响默认 launch；正在运行的节点也必须重启。
+配置安装在 `~/my_ws/my_uav_vln/ros2_ws/install/px4ctrl2/share/px4ctrl2/config/ctrl.yaml`。改源目录配置后需要重新构建/安装，才能影响默认 launch；正在运行的节点也必须重启。
 
 ## 1. 终端 1：PX4 与 Gazebo
 
 首次联调建议先结束此前已落地、未解锁的旧仿真和旧 MAVROS/ctrl2，避免多个控制节点或多个仿真世界同时运行。若飞机仍在空中，不要直接关闭进程，应先完成降落。
 
 ```bash
-cd /home/l/my_ws/my_uav_vln/PX4-Autopilot
+cd ~/my_ws/my_uav_vln/PX4-Autopilot
 make px4_sitl gz_x500_depth_baylands
 ```
 
@@ -47,7 +48,7 @@ QGC 可用于观察状态，但本流程不要求保持连接。若后续希望�
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/l/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
+source ~/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
 
 ros2 launch mavros px4.launch \
   fcu_url:='udp://:14540@127.0.0.1:14580'
@@ -61,8 +62,8 @@ ros2 launch mavros px4.launch \
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/l/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
-source /home/l/my_ws/my_uav_vln/ros2_ws/install/setup.bash
+source ~/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
+source ~/my_ws/my_uav_vln/ros2_ws/install/setup.bash
 
 ros2 param set /mavros/setpoint_raw thrust_scaling 1.0
 ros2 param get /mavros/setpoint_raw thrust_scaling
@@ -99,8 +100,8 @@ ros2 topic echo /mavros/imu/data --once --qos-reliability best_effort
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/l/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
-source /home/l/my_ws/my_uav_vln/ros2_ws/install/setup.bash
+source ~/my_ws/my_uav_vln/external/mavros_ws/install/setup.bash
+source ~/my_ws/my_uav_vln/ros2_ws/install/setup.bash
 
 ros2 launch px4ctrl2 run_ctrl.launch.py
 ```
@@ -116,7 +117,7 @@ ros2 param get /px4ctrl2 takeoff_height
 ros2 param get /px4ctrl2 odom_topic
 ```
 
-应分别为 **0.76、0.9、1.0、/mavros/local_position/odom**。若 hover_percentage 不是 0.76，先重新构建包并重启终端 4，不发起飞请求。
+包内默认值分别为 **0.76、0.9、1.0、/mavros/local_position/odom**；使用外部模型配置时，以该配置为准。先核对本次加载值与所用模型一致，再请求起飞。
 
 当前用 PX4 自身里程计进行控制；OpenVINS 可以旁路运行，但不作为本次起飞前置条件。
 
@@ -219,10 +220,16 @@ listener vehicle_attitude_setpoint 1
 
 PX4 ULog 位于 `PX4-Autopilot/build/px4_sitl_default/rootfs/log/`。arm 成功、PX4 提示 Takeoff detected 或节点服务返回 true，都不能单独证明飞机已达到指定高度并悬停。
 
-## 9. OpenVINS / 传感器终端
+## 9. 外部 OpenVINS / FAST-LIO 定位
 
-先用上述四终端完成可重复的起降，再添加传感器 bridge 与 OpenVINS。原来的启动步骤见 `docs/work_log/10.10.md`。它们可在独立终端运行，默认不改变 ctrl2 的 PX4 里程计输入，也不需要为 ctrl2 启动 Micro XRCE-DDS Agent。
+外部工程负责传感器、估计器和 IMU 到机体的适配。控制器可通过 odom_topic 接收
+`/openvins/body_odom` 或 `/fastlio/body_odom`，目标节点需同步设置 world_frame、
+odom_topic 和 localization_source，具体命令见 [README](README.md)。
 
-### 悬停推力估算的边界
+本页的手动流程使用 PX4/MAVROS 定位，不等于外部无 GPS 定位已完成部署。
+完整工程的一键启动器、场景、定位桥和 EGO 不包含在此仓库。仿真时间模式
+还需由集成方统一 MAVROS、外部位姿和控制节点的时钟，不能只切换单个开关。
 
-估算假定四个电机转速相同、机体水平，使用总升力 `4 * motorConstant * omega^2 = mass * g`，得到 omega≈797.4，再按 `(omega-150)/(1000-150)` 得到约 0.762。实际分配、机体倾斜、电机动态和地面效应会改变结果；这只解释为什么原来 0.5 的配置可能起不来，不能替代飞行验收。在线辨识仅在悬停/命令状态启用，因此在第一次起飞前不会自动修正过低的推力初值。
+### 历史模型的悬停推力估算
+
+以下为旧模型的计算记录，不用于当前 MID360 模型：估算假定四个电机转速相同、机体水平，使用总升力 `4 * motorConstant * omega^2 = mass * g`，得到 omega≈797.4，再按 `(omega-150)/(1000-150)` 得到约 0.762。实际分配、机体倾斜、电机动态和地面效应会改变结果；这只解释为什么原来 0.5 的配置可能起不来，不能替代飞行验收。在线辨识仅在悬停/命令状态启用，因此在第一次起飞前不会自动修正过低的推力初值。

@@ -17,13 +17,16 @@ px4ctrl2/
 ├── README.md                         # 功能、依赖、构建及接口入口
 ├── ARCHITECTURE.md                   # 文件架构与模块职责
 ├── STARTUP.md                        # PX4/MAVROS 手动启动与起降检查
+├── CHANGELOG.md                      # 更新记录与验证范围
 ├── include/
 │   └── px4ctrl2/
 │       ├── controller.hpp            # 控制数据类型与算法接口声明
+│       ├── freshness.hpp             # 现实/仿真时间检查接口声明
 │       └── px4ctrl2_node.hpp          # ROS 节点声明、成员与状态定义
 ├── src/
 │   ├── main.cpp                      # 进程入口及单线程 executor
 │   ├── controller.cpp                # 控制数学、限幅和推力映射辨识
+│   ├── freshness.cpp                 # 现实/仿真时间的数据新鲜度检查
 │   ├── px4ctrl_node.cpp               # 节点初始化、参数加载与 ROS 接口注册
 │   ├── input_callbacks.cpp            # 具名订阅回调与输入检查
 │   └── state_machine.cpp              # 状态转移、起降请求及控制循环
@@ -33,7 +36,7 @@ px4ctrl2/
 │   └── ControllerDebug.msg           # 控制状态和输出调试数据
 ├── config/
 │   ├── ctrl.yaml                     # 控制器及超时参数
-│   └── rviz_goal.rviz                # global 坐标系、定位显示和目标点工具
+│   └── rviz_goal.rviz                # 默认 vio_odom、定位显示和目标点工具
 ├── launch/
 │   └── run_ctrl.launch.py            # 加载配置并指定 odom_topic
 ├── scripts/
@@ -44,6 +47,7 @@ px4ctrl2/
 │   └── thrust_calibrate.py            # 推力/电压 CSV 记录
 └── test/
     ├── controller_test.cpp           # 控制数学和推力辨识测试
+    ├── freshness_test.cpp            # 时钟域、传感器停更及现实时间看门狗
     ├── rviz_goal_test.py              # 目标处理、轨迹和日志回归测试
     └── mock_mavros_test.py            # 模拟 MAVROS 协议与状态机测试
 ```
@@ -91,9 +95,11 @@ a_des = a_reference + Kv × (v_reference - v_feedback)
 - 调用 `LinearControl`，发布 MAVROS 姿态/推力目标。
 - 发布控制器状态、调试数据和轨迹启动触发。
 
-控制循环与输入接收超时使用单调时钟；ROS 时钟用于消息时间戳。节点在单线程 executor 中运行。
+控制循环调度使用单调时钟。节点在单线程 executor 中运行。
 
-`odom_reference_time=true` 时，运动参考及推力模型窗口使用里程计源时间，避免慢速仿真放大参考速度。控制调度、反馈新鲜度和模式/解锁确认仍使用主机单调时钟；默认 false 保持原时间配置。
+`odom_reference_time=true` 时，运动参考及推力模型窗口使用里程计源时间，避免慢速仿真放大参考速度。模式/解锁确认仍使用主机单调时钟。
+
+`simulation_feedback=true` 仅由仿真入口显式启用：输入检查同时使用 `/clock` 和现实时间看门狗，MAVROS 姿态指令用仿真时间戳。默认 false 时，反馈超时和消息时间策略保持普通启动方式。`freshness.hpp` 只声明检查接口，实现及对应无 ROS 测试分别在 `src/freshness.cpp` 和 `test/freshness_test.cpp`。
 
 ### 3.3 源文件职责
 
@@ -104,6 +110,7 @@ a_des = a_reference + Kv × (v_reference - v_feedback)
 | `input_callbacks.cpp` | 订阅输入与有效性检查 | on_odometry、on_imu、on_state、on_extended_state、on_rc、on_command、on_takeoff_land |
 | `state_machine.cpp` | 飞行操作与控制循环 | transition、takeoff、hover、land、tick、request_mode、request_arm、publish |
 | `controller.cpp` | 无 ROS 的控制数学 | yaw、validQuaternion、reset、calculate、estimate、scale |
+| `freshness.cpp` | 无 ROS 的数据新鲜度判断 | freshSample |
 
 修改订阅检查时定位到 input_callbacks.cpp；修改起降状态转移时定位到 state_machine.cpp；修改参数或 ROS 接口注册时定位到 px4ctrl_node.cpp。新增成员或方法时在对应头文件补充声明。
 
@@ -142,12 +149,12 @@ stateDiagram-v2
 
 处理流程：
 
-1. 检查目标 frame_id 为 `global`。
-2. 检查目标数值、四元数及距当前机体位置的距离。
-3. 使用目标 x/y，保持当前飞行高度，采用目标四元数指定的航向。
-4. 调用 `GoalTrajectory` 生成平滑参考。
-5. 以 20 Hz 发布 `/px4ctrl2/command`。
-6. 到点条件持续满足后停止指令流，并请求 `/px4ctrl2/hover`。
+1. 检查目标 frame_id 与 `world_frame` 参数一致，默认 `vio_odom`。
+2. 检查数值、四元数、距离及可选的三维边界；越界目标不替换已执行任务。
+3. `/goal_pose` 保持当前高度，`/goal_pose_3d` 使用目标 x/y/z。
+4. 普通模式调用 `GoalTrajectory`；EGO 模式发送目标并接收经过时效、状态和限幅检查的新轨迹。
+5. 以 20 Hz 发布 `/px4ctrl2/command`；监督定位支持、轨迹停更、停滞和持续远离目标。
+6. 到点条件持续满足后停止指令流，并请求 `/px4ctrl2/hover`；EGO 模式同时发布取消消息。
 
 节点提供 `/rviz_goal/cancel` 服务取消目标流，通过 `/rviz_goal/status` 输出目标接受、拒绝和完成信息。取消服务本身不负责降落；上层操作程序应在取消后调用控制器 hover/land。
 
@@ -159,7 +166,7 @@ stateDiagram-v2
 
 ### 5.3 rviz_goal.rviz
 
-默认 Fixed Frame 为 `global`，显示机体定位及目标标记，并配置 `2D Goal Pose` 工具发布 `/goal_pose`。网格尺寸为 1 米。
+默认 Fixed Frame 为 `vio_odom`，显示机体定位及目标标记，并配置 `2D Goal Pose` 工具发布 `/goal_pose`。网格尺寸为 1 米。观测表面和机体轨迹默认显示，膨胀安全边界默认隐藏。
 
 默认视角为 Orbit。rviz_goal_marker.py 创建三轴平移与航向旋转控制；目标节点内 InteractiveMarkerServer 管理草稿，菜单确认后使用完整三维目标。`/goal_pose_3d` 保留指定高度，二维输入仍保持飞行高度。
 
@@ -207,12 +214,12 @@ stateDiagram-v2
 | `/goal_pose` | `geometry_msgs/msg/PoseStamped` | RViz 点击目标 |
 | `/goal_pose_3d` | `geometry_msgs/msg/PoseStamped` | 完整 x/y/z 目标 |
 | `/rviz_goal/interactive_target` | InteractiveMarkerServer 命名空间 | 三维目标编辑与确认 |
-| `/openvins/body_odom` | `nav_msgs/msg/Odometry` | 当前目标节点的定位输入 |
+| `odom_topic`（默认 `/openvins/body_odom`） | `nav_msgs/msg/Odometry` | 可配置的目标节点机体定位输入 |
 | `/rviz_goal/target` | `visualization_msgs/msg/Marker` | 目标显示 |
 | `/rviz_goal/status` | `std_msgs/msg/String` | 目标处理结果 |
 | `/rviz_goal/cancel` | `std_srvs/srv/Trigger` | 停止目标流 |
 
-控制器的定位输入可以配置；当前 RViz 节点固定订阅 `/openvins/body_odom` 并要求 `global` 坐标，使用其他定位源时需调整或 remap，并核对坐标约定。
+控制器和目标节点分别配置定位话题。FAST-LIO 集成时，目标节点使用 `odom_topic=/fastlio/body_odom`、`world_frame=lio_odom`、`localization_source=fastlio`，并通过 `/fastlio/status` 检查匹配支持；VIO 模式检查特征支持。EGO 还需提供观测位姿、规划指令、拒绝状态，并处理 `/ego/cancel`，完整协议见 README。
 
 ## 8. 坐标与时间约定
 
@@ -220,7 +227,7 @@ stateDiagram-v2
 - 位置参考的 frame_id 必须与定位 frame_id 相同，不执行隐式 TF 转换。
 - `velocity_in_body=true` 时，将 Odometry 中的机体线速度旋转到定位世界坐标系。
 - MAVROS 负责飞控边界的 ENU/NED、FLU/FRD 转换。
-- `global` 在 OpenVINS 流程中是局部世界系，不表示 GPS 经纬度。
+- `vio_odom`、`lio_odom` 是不同的局部世界系，不表示 GPS 经纬度，也不自动建立彼此的 TF。
 - 反馈时间戳需非零且持续推进；重复时间戳不刷新接收新鲜度。
 - 源时间回退、飞行中 frame 改变、反馈超时等情况触发中止检查。
 
@@ -229,10 +236,10 @@ stateDiagram-v2
 `CMakeLists.txt` 执行以下任务：
 
 1. 生成三个自定义消息的 ROS 类型支持。
-2. 将 controller.cpp 构建为内部静态库 px4ctrl2_control，供控制节点与 controller_test 共用；编译 Node 的三个实现源文件和 main.cpp 生成 px4ctrl2_node。
+2. 将 controller.cpp 和 freshness.cpp 构建为内部静态库 px4ctrl2_control，供控制节点及原生测试共用；编译 Node 的三个实现源文件和 main.cpp 生成 px4ctrl2_node。
 3. 安装 Python 脚本及轨迹辅助模块到 `lib/px4ctrl2/`。
 4. 安装 launch、配置和技术文档到 `share/px4ctrl2/`。
-5. BUILD_TESTING 启用时注册 `controller_test` 与 `rviz_goal_test`。
+5. BUILD_TESTING 启用时注册 `controller_test`、`freshness_test` 与 `rviz_goal_test`。
 
 `goal_trajectory.py` 是由目标节点导入的辅助模块，不注册为 ROS 可执行节点。`mock_mavros_test.py` 为手动运行的协议测试，当前未注册到 CTest。
 

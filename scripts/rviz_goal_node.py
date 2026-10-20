@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""RViz planar/3D goals -> smooth px4ctrl2 references in the VIO global frame."""
+"""RViz planar/3D goals -> px4ctrl2 references in a configured VIO/LIO frame."""
 from copy import deepcopy
 import math
+import json
 import time
 import numpy as np
 import rclpy
@@ -9,7 +10,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
 from geometry_msgs.msg import PoseStamped, Point
 from nav_msgs.msg import Odometry
-from std_msgs.msg import String
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import String, Empty
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, InteractiveMarkerFeedback
 from interactive_markers.interactive_marker_server import InteractiveMarkerServer
@@ -31,21 +34,55 @@ def yaw(q):
 class GoalNode(Node):
     def __init__(self):
         super().__init__('rviz_goal')
+        self.simulation_feedback = self.declare_parameter('simulation_feedback', False).value
+        self.simulation_stamp = None
+        self.simulation_at = 0.
+        self.simulation_fault = False
+        if self.simulation_feedback:
+            self.create_subscription(Clock, '/clock', self.on_clock, qos_profile_sensor_data)
         self.ego_mode = self.declare_parameter('use_ego_planner', False).value
+        self.frame = self.declare_parameter('world_frame', 'vio_odom').value
+        self.odom_topic = self.declare_parameter('odom_topic', '/openvins/body_odom').value
+        self.localization_source = self.declare_parameter('localization_source', 'openvins').value
+        if self.localization_source not in ('openvins', 'fastlio'):raise ValueError('Invalid localization source')
+        self.lio_health = None; self.lio_health_at = 0.
+        if self.localization_source == 'fastlio':
+            self.create_subscription(String, '/fastlio/status', self.on_lio_health, 10)
         self.ego_goal = None
         self.ego_command = None
         self.ego_command_at = self.ego_map_at = 0.
+        self.ego_map_stamp = 0.
         self.ego_map_timeout = 2.0  # depth is throttled in sensor time
         self.ego_seen_id = self.ego_reject_id = -1
+        self.vio_min_features = self.declare_parameter('vio_min_features', 6 if self.ego_mode else 0).value
+        if not isinstance(self.vio_min_features, int) or self.vio_min_features < 0:
+            raise ValueError('vio_min_features must be a nonnegative integer')
+        self.vio_features = {}
+        self.vio_weak_since = None
+        self.last_visual_support_at = None
+        self.progress_at = 0.
         if self.ego_mode:
             from quadrotor_msgs.msg import PositionCommand as PlannerCommand
             self.ego_goal_pub = self.create_publisher(PoseStamped, '/ego/goal', 10)
+            self.ego_cancel_pub = self.create_publisher(Empty, '/ego/cancel', 10)
             self.ego_command_sub = self.create_subscription(PlannerCommand, '/ego/position_cmd', self.on_ego_command, 10)
             self.ego_pose_sub = self.create_subscription(PoseStamped, '/ego/camera_pose', self.on_ego_pose, 5)
+            self.ego_status_sub = self.create_subscription(String, '/ego/planner_status', self.on_ego_status, 10)
+            self.vio_feature_subs = [self.create_subscription(
+                PointCloud2, f'/ov_msckf/points_{kind}',
+                lambda msg, kind=kind: self.on_vio_features(kind, msg), qos_profile_sensor_data)
+                for kind in ('msckf','slam')] if self.localization_source == 'openvins' else []
         self.speed = self.declare_parameter('max_speed', 0.4).value
         self.accel = self.declare_parameter('max_acceleration', 0.3).value
         self.max_distance = self.declare_parameter('max_goal_distance', 5.0).value
         self.position_tolerance = self.declare_parameter('position_tolerance', 0.15).value
+        self.enforce_goal_bounds = self.declare_parameter('enforce_goal_bounds', False).value
+        self.goal_min = np.array(self.declare_parameter('goal_min_xyz', [-1e6,-1e6,-1e6]).value)
+        self.goal_max = np.array(self.declare_parameter('goal_max_xyz', [1e6,1e6,1e6]).value)
+        if (self.goal_min.shape != (3,) or self.goal_max.shape != (3,)
+                or not np.isfinite(np.r_[self.goal_min,self.goal_max]).all()
+                or np.any(self.goal_min >= self.goal_max)):
+            raise ValueError('goal bounds require three finite ordered coordinates')
         for value in (self.speed, self.accel, self.max_distance, self.position_tolerance):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError('goal limits must be positive and finite')
@@ -68,7 +105,7 @@ class GoalNode(Node):
         self.marker_pub = self.create_publisher(Marker, '/rviz_goal/target', latched)
         self.goal_sub = self.create_subscription(PoseStamped, '/goal_pose', self.goal, 10)
         self.goal_3d_sub = self.create_subscription(PoseStamped, '/goal_pose_3d', self.goal_3d, 10)
-        self.odom_sub = self.create_subscription(Odometry, '/openvins/body_odom', self.on_odom, qos_profile_sensor_data)
+        self.odom_sub = self.create_subscription(Odometry, self.odom_topic, self.on_odom, qos_profile_sensor_data)
         self.state_sub = self.create_subscription(String, '/px4ctrl2/state', self.on_state, latched)
         self.hover_client = self.create_client(Trigger, '/px4ctrl2/hover')
         self.cancel_service = self.create_service(Trigger, '/rviz_goal/cancel', self.cancel)
@@ -83,7 +120,8 @@ class GoalNode(Node):
         heading = yaw(pose.orientation)
         pose.orientation.x = pose.orientation.y = 0.
         pose.orientation.z, pose.orientation.w = math.sin(heading/2), math.cos(heading/2)
-        self.marker_server.insert(make_goal_marker(pose), feedback_callback=self.edit_marker)
+        height_range = (self.goal_min[2],self.goal_max[2]) if self.enforce_goal_bounds else None
+        self.marker_server.insert(make_goal_marker(pose, self.frame, height_range), feedback_callback=self.edit_marker)
         self.marker_menu.apply(self.marker_server, 'flight_target')
         self.marker_server.applyChanges()
         self.editable_initialized = True
@@ -117,6 +155,8 @@ class GoalNode(Node):
     def on_state(self, msg):
         self.state, self.state_at = msg.data, time.monotonic()
         if self.state not in ('AUTO_HOVER', 'CMD_CTRL'):
+            if self.ego_mode and self.ego_goal is not None:
+                self.ego_cancel_pub.publish(Empty())
             self.trajectory = None
             self.ego_goal = self.ego_command = None
             self.settled_at = None
@@ -127,13 +167,30 @@ class GoalNode(Node):
 
     def feedback_valid(self):
         now = time.monotonic()
-        return (self.odom is not None and now-self.odom_at < 0.5
-                and now-self.state_at < 0.5 and self.state in ('AUTO_HOVER', 'CMD_CTRL')
-                and self.odom.header.frame_id == 'global')
+        stamp = (self.odom.header.stamp.sec+self.odom.header.stamp.nanosec*1e-9) if self.odom else 0.
+        return (self.odom is not None and self.sample_fresh(self.odom_at, stamp, .5)
+                and now-self.state_at < (2. if self.simulation_feedback else .5) and self.state in ('AUTO_HOVER', 'CMD_CTRL')
+                and self.odom.header.frame_id == self.frame)
+
+    def on_clock(self, msg):
+        stamp = msg.clock.sec+msg.clock.nanosec*1e-9
+        if self.simulation_stamp is not None and stamp < self.simulation_stamp:
+            self.simulation_fault = True
+        if stamp != self.simulation_stamp:
+            self.simulation_at = time.monotonic()
+        self.simulation_stamp = stamp
+
+    def sample_fresh(self, received_at, stamp, timeout):
+        now = time.monotonic()
+        if not self.simulation_feedback:
+            return 0 <= now-received_at < timeout
+        return (not self.simulation_fault and self.simulation_stamp is not None
+                and 0 <= now-received_at < 2. and 0 <= now-self.simulation_at < 2.
+                and -.1 <= self.simulation_stamp-stamp < timeout)
 
     def reference_time(self):
         # Reference velocities are metres per sensor second, even when Gazebo
-        # runs slower than wall time. Reception watchdogs still use monotonic().
+        # runs slower than wall time. Simulation freshness also checks /clock.
         return self.odom.header.stamp.sec+self.odom.header.stamp.nanosec*1e-9
 
     def goal(self, msg):
@@ -146,8 +203,8 @@ class GoalNode(Node):
         if not self.feedback_valid() or self.hover_future is not None:
             self.notify('Goal ignored: take off and wait for AUTO_HOVER with fresh odometry', True)
             return
-        if msg.header.frame_id != 'global':
-            self.notify('Goal ignored: RViz Fixed Frame must be global', True)
+        if msg.header.frame_id != self.frame:
+            self.notify(f'Goal ignored: RViz Fixed Frame must be {self.frame}', True)
             return
         now = time.monotonic()
         p = self.odom.pose.pose.position
@@ -159,9 +216,24 @@ class GoalNode(Node):
             target = np.array([msg.pose.position.x, msg.pose.position.y, height, yaw(msg.pose.orientation)])
             if not np.isfinite(target).all() or np.linalg.norm(target[:3]-current[:3]) > self.max_distance:
                 raise ValueError(f'goal must be finite and within {self.max_distance:.1f} m of the vehicle')
+            if self.enforce_goal_bounds:
+                if not self.goal_min[2] <= target[2] <= self.goal_max[2]:
+                    raise ValueError(f'目标 Z={target[2]:.2f} m 超出导航高度范围 '
+                                     f'[{self.goal_min[2]:.2f}, {self.goal_max[2]:.2f}] m（{self.frame}）；目标未提交')
+                if np.any(target[:2] < self.goal_min[:2]) or np.any(target[:2] > self.goal_max[:2]):
+                    raise ValueError(f'目标 XY 超出规划地图范围（{self.frame}）；目标未提交')
             if self.ego_mode:
-                if now-self.ego_map_at > self.ego_map_timeout:
-                    raise ValueError('EGO depth/camera pose input is stale')
+                if not self.sample_fresh(self.ego_map_at, self.ego_map_stamp, self.ego_map_timeout):
+                    raise ValueError('EGO sensor/map input is stale')
+                if not self.visual_support(allow_grace=True):
+                    raise ValueError('FAST-LIO matching support is insufficient' if self.localization_source == 'fastlio' else 'OpenVINS visual support is insufficient; wait for features before navigating')
+                distance = np.linalg.norm(target[:3]-current[:3])
+                velocity = self.odom.twist.twist.linear
+                if (self.state == 'AUTO_HOVER' and distance < self.position_tolerance
+                        and np.linalg.norm([velocity.x, velocity.y, velocity.z]) < 0.15):
+                    self.publish_target(target)
+                    self.request_hover('EGO target reached: already within position tolerance; switching to AUTO_HOVER')
+                    return
                 goal = deepcopy(msg)
                 goal.pose.position.z = float(height)
                 self.ego_goal = target
@@ -169,7 +241,14 @@ class GoalNode(Node):
                 self.ego_reject_id = self.ego_seen_id
                 self.start_at = self.reference_time()
                 self.settled_at = None
+                self.vio_weak_since = None
+                self.progress_at = self.reference_time()
+                self.ego_progress_position = current[:3].copy()
+                self.ego_progress_time = self.reference_time()
+                self.ego_best_distance = distance
+                self.ego_approach_time = self.reference_time()
                 self.ego_goal_pub.publish(goal)
+                self.publish_target(target)
                 self.notify(f'EGO goal x={target[0]:.2f}, y={target[1]:.2f}, z={target[2]:.2f}; waiting for a new planned trajectory')
                 return
             if self.trajectory:
@@ -182,8 +261,12 @@ class GoalNode(Node):
             return
         self.trajectory, self.start_at = trajectory, self.reference_time()
         self.goal_at, self.settled_at = now, None
+        self.publish_target(target)
+        self.notify(f'Target x={target[0]:.2f}, y={target[1]:.2f}, z={target[2]:.2f}; duration {trajectory.duration:.1f}s')
+
+    def publish_target(self, target):
         marker = Marker()
-        marker.header.frame_id = 'global'
+        marker.header.frame_id = self.frame
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns, marker.id, marker.type, marker.action = 'target', 0, Marker.SPHERE, Marker.ADD
         marker.pose.position = Point(x=float(target[0]), y=float(target[1]), z=float(target[2]))
@@ -191,15 +274,18 @@ class GoalNode(Node):
         marker.scale.x = marker.scale.y = marker.scale.z = 0.2
         marker.color.r, marker.color.g, marker.color.a = 1., 0.5, 1.
         self.marker_pub.publish(marker)
-        self.notify(f'Target x={target[0]:.2f}, y={target[1]:.2f}, z={target[2]:.2f}; duration {trajectory.duration:.1f}s')
 
     def cancel(self, request, response):
+        if self.ego_mode:
+            self.ego_cancel_pub.publish(Empty())
         self.trajectory, self.settled_at = None, None
         self.ego_goal = self.ego_command = None
         response.success, response.message = True, 'RViz goal stream cancelled'
         return response
 
     def request_hover(self, reason):
+        if self.ego_mode:
+            self.ego_cancel_pub.publish(Empty())
         self.trajectory, self.settled_at = None, None
         self.ego_goal = self.ego_command = None
         self.notify(reason)
@@ -232,8 +318,10 @@ class GoalNode(Node):
         elapsed = self.reference_time()-self.start_at
         p, v, a = self.trajectory.sample(elapsed)
         out = PositionCommand()
-        out.header.frame_id = 'global'
+        out.header.frame_id = self.frame
         out.header.stamp = self.get_clock().now().to_msg()
+        if self.simulation_feedback:
+            out.header.stamp = deepcopy(self.odom.header.stamp)
         out.position = Point(x=float(p[0]), y=float(p[1]), z=float(p[2]))
         out.velocity.x, out.velocity.y, out.velocity.z = map(float, v[:3])
         out.acceleration.x, out.acceleration.y, out.acceleration.z = map(float, a[:3])
@@ -256,12 +344,41 @@ class GoalNode(Node):
 
     def on_ego_pose(self, msg):
         self.ego_map_at = time.monotonic()
+        self.ego_map_stamp = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
+
+    def on_ego_status(self, msg):
+        if self.ego_goal is not None and msg.data.startswith('REJECTED:'):
+            self.request_hover('EGO goal rejected: '+msg.data.removeprefix('REJECTED:').strip())
+
+    def on_vio_features(self, kind, msg):
+        self.vio_features[kind] = (time.monotonic(), msg.width*msg.height)
+
+    def on_lio_health(self, msg):
+        self.lio_health = json.loads(msg.data); self.lio_health_at = time.monotonic()
+
+    def visual_support(self, allow_grace=False):
+        if self.localization_source == 'fastlio':
+            return bool(self.lio_health and self.lio_health.get('ready')
+                        and self.sample_fresh(self.lio_health_at, self.lio_health.get('stamp',0.), .5))
+        if self.vio_min_features == 0:
+            return True
+        now = time.monotonic()
+        fresh = [value[1] for value in self.vio_features.values()
+                 if now-value[0] <= 1.5]
+        supported = bool(fresh) and sum(fresh) >= self.vio_min_features
+        if supported:
+            self.last_visual_support_at = now
+            return True
+        # Point-cloud visualization is conditional. A single empty DDS sample
+        # should not reject a target while OpenVINS still has landmarks.
+        return bool(allow_grace and self.last_visual_support_at is not None
+                    and now-self.last_visual_support_at <= 3.0)
 
     def on_ego_command(self, msg):
         self.ego_seen_id = msg.trajectory_id
         if self.ego_goal is None or msg.trajectory_id == self.ego_reject_id:
             return
-        if msg.trajectory_flag != msg.TRAJECTORY_STATUS_READY or msg.header.frame_id != 'global':
+        if msg.trajectory_flag != msg.TRAJECTORY_STATUS_READY or msg.header.frame_id != self.frame:
             return
         stamp = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
         if stamp <= 0 or not -0.1 <= self.reference_time()-stamp <= 0.5:
@@ -285,20 +402,47 @@ class GoalNode(Node):
         if self.ego_goal is None:
             return
         now = time.monotonic()
-        if not self.feedback_valid() or now-self.ego_map_at > self.ego_map_timeout:
-            self.request_hover('EGO goal cancelled: feedback or depth stream is stale')
+        if not self.feedback_valid() or not self.sample_fresh(self.ego_map_at, self.ego_map_stamp, self.ego_map_timeout):
+            self.request_hover('EGO goal cancelled: feedback or sensor stream is stale')
             return
+        if self.visual_support(allow_grace=False):
+            self.vio_weak_since = None
+        else:
+            if self.vio_weak_since is None:
+                self.vio_weak_since = self.reference_time()
+            if self.reference_time()-self.vio_weak_since >= 2.:
+                self.request_hover('EGO goal stopped: FAST-LIO matching support is insufficient; holding current position' if self.localization_source == 'fastlio' else 'EGO goal stopped: OpenVINS visual support is insufficient; holding current position')
+                return
         if self.ego_command is None:
             if self.reference_time()-self.start_at > 10.:
                 self.request_hover('EGO planning timeout; holding current position')
             return
-        if now-self.ego_command_at > 0.5:
+        command_stamp = self.ego_command.header.stamp.sec+self.ego_command.header.stamp.nanosec*1e-9
+        if not self.sample_fresh(self.ego_command_at, command_stamp, .5):
             self.request_hover('EGO trajectory stream stopped; holding current position')
             return
         self.command_pub.publish(self.ego_command)
         p = self.odom.pose.pose.position
         v = self.odom.twist.twist.linear
         error = np.linalg.norm(np.array([p.x,p.y,p.z])-self.ego_goal[:3])
+        if error < self.ego_best_distance-0.1:
+            self.ego_best_distance = error
+            self.ego_approach_time = self.reference_time()
+        elif (error > self.ego_best_distance+1.0
+              and self.reference_time()-self.ego_approach_time >= 15.):
+            self.request_hover('EGO goal stopped: trajectory is moving away from the accepted target without recovery; holding current position')
+            return
+        position = np.array([p.x,p.y,p.z])
+        if np.linalg.norm(position-self.ego_progress_position) >= 0.15:
+            self.ego_progress_position = position
+            self.ego_progress_time = self.reference_time()
+        elif (error > self.position_tolerance
+              and self.reference_time()-self.ego_progress_time > 10.):
+            self.request_hover('EGO goal stopped: no progress for 10 s; planner may be blocked; holding current position')
+            return
+        if self.reference_time()-self.progress_at >= 5.:
+            self.notify(f'EGO progress: remaining {error:.2f} m to accepted target')
+            self.progress_at = self.reference_time()
         if error < self.position_tolerance and np.linalg.norm([v.x,v.y,v.z]) < 0.15:
             self.settled_at = self.settled_at or now
             if now-self.settled_at >= 1.:

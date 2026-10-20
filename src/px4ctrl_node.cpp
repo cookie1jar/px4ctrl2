@@ -23,6 +23,10 @@ Node::Node() : rclcpp::Node("px4ctrl2") {
 
 void Node::load_parameters() {
   odom_reference_time_ = declare_parameter("odom_reference_time", false);
+  simulation_feedback_ = declare_parameter("simulation_feedback", false);
+  simulation_wall_timeout_ = declare_parameter("simulation_wall_timeout", 2.0);
+  if (!std::isfinite(simulation_wall_timeout_) || simulation_wall_timeout_ <= 0.5)
+    throw std::invalid_argument("simulation_wall_timeout must exceed 0.5 s");
   frequency_ = declare_parameter("control_frequency", 100.0);
   feedback_timeout_ = declare_parameter("feedback_timeout", 0.5);
   state_timeout_ = declare_parameter("state_timeout", 2.0);
@@ -69,6 +73,10 @@ void Node::load_parameters() {
 void Node::setup_subscriptions() {
   using std::placeholders::_1;
   const auto sensor_qos = rclcpp::SensorDataQoS();
+  if (simulation_feedback_) {
+    clock_sub_ = create_subscription<rosgraph_msgs::msg::Clock>(
+        "/clock", sensor_qos, std::bind(&Node::on_clock, this, _1));
+  }
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       declare_parameter("odom_topic", std::string("/odom")), sensor_qos,
       std::bind(&Node::on_odometry, this, _1));

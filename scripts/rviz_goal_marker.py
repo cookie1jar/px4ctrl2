@@ -4,11 +4,13 @@ import math
 from visualization_msgs.msg import InteractiveMarker, InteractiveMarkerControl, Marker
 
 
-def make_goal_marker(pose):
+def make_goal_marker(pose, frame='vio_odom', height_range=None):
     marker = InteractiveMarker()
-    marker.header.frame_id = 'global'
+    marker.header.frame_id = frame
     marker.name = 'flight_target'
     marker.description = '3D target: drag axes; right-click -> Fly to target'
+    if height_range is not None:
+        marker.description += f'\nZ: {height_range[0]:.2f} .. {height_range[1]:.2f} m ({frame})'
     marker.scale = 0.8
     marker.pose = deepcopy(pose)
     sphere = Marker()
